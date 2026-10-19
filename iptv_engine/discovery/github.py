@@ -13,7 +13,9 @@ from __future__ import annotations
 import base64
 import json
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Set, Tuple
 
 from ..config import get as cfg_get
@@ -57,10 +59,27 @@ class GitHubDiscoverer(BaseDiscoverer):
         super().__init__(fetcher, cfg)
         self.api_base = cfg_get(cfg, "github.api_base", "https://api.github.com")
         self.token = cfg_get(cfg, "github.token", "") or ""
+        # 并发扫描仓库数。串行 400 个仓库要十几分钟，并发后大幅缩短。
+        # 不宜过大：每个仓库会发 2 次 API 请求，并发高容易触发限流。
+        self.scan_workers = int(cfg_get(cfg, "github.scan_workers", 8) or 8)
+        # API 限流：每线程独立节流。
+        # 注意不能用共享的 _last_api —— 那样 8 个线程会互相阻塞在同一个
+        # 1 秒间隔上，并发就白加了。每个线程自己算自己的节流即可：
+        # 总速率 = 线程数 × (1/api_limiter)。
         self.api_limiter = max(1.0, 3600 / int(cfg_get(cfg, "github.rate_limit_per_hour", 4800)))
-        self._last_api = 0.0
+        self._local = threading.local()
         self._repo_cache: Set[str] = set()
+        self._repo_lock = threading.Lock()
         self._api_calls = 0
+        self._api_count_lock = threading.Lock()
+
+    def _throttle(self) -> None:
+        last = getattr(self._local, "last_api", 0.0)
+        now = time.monotonic()
+        wait = self.api_limiter - (now - last)
+        if wait > 0:
+            time.sleep(wait)
+        self._local.last_api = time.monotonic()
 
     # ------------------------------------------------------------ API 基础
     def _headers(self) -> Dict[str, str]:
@@ -74,12 +93,9 @@ class GitHubDiscoverer(BaseDiscoverer):
 
     def _api(self, path: str, params: Optional[dict] = None) -> Optional[dict]:
         """调用 GitHub API，内置限流与 403/429 退避。"""
-        self._last_api = max(self._last_api, time.monotonic())
-        wait = self.api_limiter - (time.monotonic() - self._last_api)
-        if wait > 0:
-            time.sleep(wait)
-        self._last_api = time.monotonic()
-        self._api_calls += 1
+        self._throttle()
+        with self._api_count_lock:
+            self._api_calls += 1
 
         try:
             s = self.fetcher.sf.get()
@@ -165,15 +181,42 @@ class GitHubDiscoverer(BaseDiscoverer):
         self.log.info("本轮共扫描 %d 个仓库", len(repo_list))
 
         # 4) 遍历每个仓库，找播放列表文件并抽取
+        #
+        # 注意：这里必须并发 + 定期打进度。原实现是串行 for 循环，
+        # 400 个仓库 × (2 次 API + 若干 raw 抓取) 顺序跑下来要十几分钟，
+        # 而且只有扫出结果时才打日志 —— 长时间无输出会让人误以为卡死。
         candidates: List[Candidate] = []
-        for idx, repo in enumerate(repo_list, 1):
-            try:
-                got = self._scan_repo(repo)
+        total = len(repo_list)
+        if total:
+            self.log.info("开始扫描 %d 个仓库（并发 %d）…", total,
+                          self.scan_workers)
+        done = 0
+        started = time.monotonic()
+        with ThreadPoolExecutor(max_workers=self.scan_workers) as ex:
+            fut2repo = {ex.submit(self._scan_repo, r): r for r in repo_list}
+            for fut in as_completed(fut2repo):
+                repo = fut2repo[fut]
+                done += 1
+                try:
+                    got = fut.result()
+                except Exception as exc:  # noqa: BLE001
+                    got = []
+                    self.log.debug("扫描仓库失败 %s: %s", repo, exc)
                 if got:
                     candidates.extend(got)
-                    self.log.info("[%d/%d] %s → %d 条", idx, len(repo_list), repo, len(got))
-            except Exception as exc:  # noqa: BLE001
-                self.log.debug("扫描仓库失败 %s: %s", repo, exc)
+                    self.log.info("[%d/%d] %s → %d 条", done, total, repo, len(got))
+                else:
+                    # 无结果的仓库也要计入进度，否则看不出在动
+                    self.log.debug("[%d/%d] %s → 0 条", done, total, repo)
+                # 定期进度心跳（每 5 个或每 30 秒，无论有无结果都报）
+                now = time.monotonic()
+                if done % 5 == 0 or now - started >= 30 or done == total:
+                    elapsed = now - started
+                    eta = (elapsed / done * (total - done)) if done else 0
+                    self.log.info(
+                        "扫描进度 %d/%d（%.0f%%）已用 %.0fs 预计剩余 %.0fs | 累计候选 %d 条",
+                        done, total, 100.0 * done / total, elapsed, eta,
+                        len(candidates))
 
         if cfg_get(self.cfg, "persist_discovered_repos", True):
             self._persist_repos(repos)
@@ -190,9 +233,10 @@ class GitHubDiscoverer(BaseDiscoverer):
         return any(k in low for k in keys)
 
     def _scan_repo(self, repo: str) -> List[Candidate]:
-        if repo.lower() in self._repo_cache:
-            return []
-        self._repo_cache.add(repo.lower())
+        with self._repo_lock:
+            if repo.lower() in self._repo_cache:
+                return []
+            self._repo_cache.add(repo.lower())
 
         meta = self._api(f"/repos/{repo}")
         if not meta:
