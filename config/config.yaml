@@ -153,7 +153,9 @@ publish:
     # 仓库坐标由环境变量提供（Actions 中自动注入），不落盘明文
     repo_from_env: "GITHUB_REPOSITORY"
     token_from_env: "GITHUB_TOKEN"
-    branch: "main"
+    # auto = 自动跟随运行环境（CI 用 GITHUB_REF_NAME，本地用当前分支）
+    # 也可写死具体分支名
+    branch: "auto"
     commit_message: "chore: 自动更新直播源 ({date})"
   # 允许通过 raw 直链暴露
   expose_raw: true
