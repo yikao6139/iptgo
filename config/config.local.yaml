@@ -1,0 +1,56 @@
+# ==========================================================================
+# 本地测试配置（覆盖文件）
+#
+# 用法：
+#   EXTRA_CONFIG=config/config.local.yaml python main.py run --skip-publish
+#
+# 设计意图：本地环境常常访问不了 GitHub（SSL 被拦）或搜索引擎超时，
+# 与其干等超时重试，不如按本机实际网络情况裁剪通路，把时间花在能跑通的地方。
+# CI 线上不加载本文件，走 config/config.yaml 的全通路配置。
+# ==========================================================================
+
+# 本机只验证「搜索引擎」这一条通路；GitHub 通路在本机 SSL 被拦
+discovery_channels:
+  meta: true        # GitHub 现在可直连了，元列表通路也能用
+  github: true      # 主力通路
+  search: true
+
+# 缩减搜索规模，本机测试够用即可
+discovery:
+  search_pages: 1
+  web_keywords:
+    - "免费直播源 m3u8 列表"
+  search_engines:
+    - name: bing
+      endpoint: "https://www.bing.com/search"
+      enabled: true
+
+# 本机限制扫描规模，避免单次跑太久
+max_discovered_repos: 8
+github:
+  max_files_per_repo: 5
+
+crawler:
+  max_workers: 8      # 本机并发压低，避免被目标限流
+  qps: 3
+  connect_timeout: 6
+  read_timeout: 10
+  retries: 1          # 本机不重试，快速失败暴露问题
+  # 本机装了 Steam++/Watt Toolkit，它注入的 http_proxy 对 GitHub 不稳定
+  # （频繁 502/403），必须绕过直连。
+  bypass_env_proxy: true
+
+validation:
+  # 项目根目录下有 ffmpeg/bin/ 时，引擎会自动发现并启用 L5 真实解码验证。
+  # 若移到别处或删除，改用环境变量指定：
+  #   FFMPEG_BIN=/path/ffmpeg FFPROBE_BIN=/path/ffprobe
+  require_decode: true
+  http_timeout: 8
+  max_consecutive_failures: 3
+
+lifecycle:
+  max_check_per_run: 30   # 本机只验 30 条，跑得快
+
+publish:
+  github_repo:
+    enabled: false        # 本机不推送，避免误推远端

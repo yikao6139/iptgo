@@ -1,0 +1,199 @@
+name: 每日 IPTV 源发现与验证
+
+# ==============================================================
+# 触发时机：每天凌晨 2:00（北京时间）
+# GitHub Actions 使用 UTC 调度，北京时间 = UTC+8
+#   02:00 CST (UTC+8) = 18:00 UTC (前一天的 18 点)
+# 因此 cron 写作 '0 18 * * *'
+# ==============================================================
+on:
+  schedule:
+    - cron: "0 18 * * *"
+  # 手动触发（便于调试与补跑）
+  workflow_dispatch:
+    inputs:
+      max_check:
+        description: "本轮最多验证条数（0=使用配置默认值）"
+        required: false
+        default: "0"
+      skip_publish:
+        description: "跳过 GitHub 发布（只生成产物）"
+        type: boolean
+        required: false
+        default: false
+
+# 防止上一轮没跑完就叠加执行
+concurrency:
+  group: iptv-daily-run
+  cancel-in-progress: false
+
+# 关键：发布阶段需要推送产物与注册表回本仓库，必须有 contents: write。
+# 权限收紧到最小必要范围，不申请 packages/actions 等无关权限。
+permissions:
+  contents: write
+
+jobs:
+  discover-and-validate:
+    name: 发现 → 验证 → 发布
+    runs-on: ubuntu-latest
+    # 单次运行最长 6 小时（GitHub 上限 6h）
+    timeout-minutes: 360
+
+    env:
+      # 以下两个变量由 GitHub Actions 自动注入，无需在仓库里配置任何 secret：
+      #   GITHUB_TOKEN       内置令牌，有 5000 次/小时 API 配额且可推送本仓库
+      #   GITHUB_REPOSITORY  形如 owner/repo 的仓库坐标
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      # ---------------------------------------------------------- 1. 取代码
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          # 保留 credentials，让后续 git push 能复用内置令牌
+          persist-credentials: true
+
+      # ---------------------------------------------------------- 2. Python 环境
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # ---------------------------------------------------------- 3. ffmpeg
+      # ubuntu-latest 自带 ffmpeg，这里做兜底安装 + 版本确认
+      - name: Ensure ffmpeg available
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq ffmpeg
+          fi
+          ffmpeg -version | head -1
+          ffprobe -version | head -1
+
+      # ---------------------------------------------------------- 4. 恢复注册表
+      # 关键：注册表是跨天累积的状态，必须从上一次提交恢复，
+      # 否则每天都是"从零发现"，历史记录与失败计数全部丢失。
+      - name: Restore registry state
+        run: |
+          mkdir -p sources output data
+          if git cat-file -e HEAD:sources/registry.json 2>/dev/null; then
+            git show HEAD:sources/registry.json > sources/registry.json
+            echo "已从上次提交恢复注册表：$(python -c "import json;print(len(json.load(open('sources/registry.json'))['sources']))") 条"
+          else
+            echo "首次运行，将创建新注册表"
+            echo '{"meta":{},"sources":[]}' > sources/registry.json
+          fi
+          # 同时恢复动态仓库池（已发现的仓库坐标，避免重复搜索）
+          if git cat-file -e HEAD:data/discovered_repos.json 2>/dev/null; then
+            mkdir -p data
+            git show HEAD:data/discovered_repos.json > data/discovered_repos.json
+          fi
+
+      # ---------------------------------------------------------- 5. 自检
+      - name: Offline self-test
+        run: python main.py selftest
+
+      # ---------------------------------------------------------- 6. 主流程
+      # schedule 触发时 inputs 为空，故用容错表达式：
+      # 手工触发才可能带参数，定时触发一律走默认全量流程。
+      - name: Run pipeline
+        run: |
+          ARGS=""
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ inputs.max_check }}" != "" ] && [ "${{ inputs.max_check }}" != "0" ]; then
+              ARGS="$ARGS --max-check ${{ inputs.max_check }}"
+            fi
+            if [ "${{ inputs.skip_publish }}" = "true" ]; then
+              ARGS="$ARGS --skip-publish"
+            fi
+          fi
+          echo "运行参数:$ARGS"
+          python main.py run --log-level INFO $ARGS
+
+      # ---------------------------------------------------------- 7. 产物
+      - name: Collect artifacts
+        if: always()
+        run: |
+          echo "=== 产物统计 ==="
+          if [ -f output/live.m3u ]; then
+            echo "live.m3u : $(grep -c '^#EXTINF' output/live.m3u) 个频道"
+          fi
+          if [ -f output/live.txt ]; then
+            echo "live.txt : $(grep -cv '^$' output/live.txt) 行"
+          fi
+          if [ -f output/meta.json ]; then
+            echo "--- meta.json ---"
+            cat output/meta.json
+          fi
+          echo "--- 验证统计 ---"
+          python scripts/collect_stats.py data/last_validation.json
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iptv-output-${{ github.run_number }}
+          path: |
+            output/
+            data/last_validation.json
+          retention-days: 15
+
+      # ---------------------------------------------------------- 8. 回写状态
+      # 发布器（publish/github.py）已经把 output/ 与 sources/registry.json
+      # 推上去了，本步骤只做两件它没做的事：
+      #   1. 回写 data/discovered_repos.json —— 动态仓库池，发布器不碰它
+      #   2. 发布失败时兜底提交，保证下一轮仍能恢复注册表状态
+      - name: Persist discovery state
+        if: always()
+        run: |
+          git config user.name "IPTV-Bot"
+          git config user.email "iptv-bot@users.noreply.github.com"
+          git add -A sources/ data/discovered_repos.json output/ 2>/dev/null || true
+          if git diff --staged --quiet; then
+            echo "无状态变化，跳过提交"
+          else
+            git commit -m "chore: 更新发现状态 [skip ci] $(date -u '+%Y-%m-%d %H:%M UTC')"
+            git push origin HEAD:${{ github.ref_name }} || \
+              echo "⚠️ 状态回写失败（发布器可能已成功推送产物）"
+          fi
+
+      # ---------------------------------------------------------- 9. 汇总
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## 📺 IPTV 引擎每日运行报告"
+            echo ""
+            echo "- 触发方式：\`${{ github.event_name }}\`"
+            echo "- 分支：\`${{ github.ref_name }}\`"
+            echo "- 运行时间：$(date -u '+%Y-%m-%d %H:%M UTC') / $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M CST')"
+            echo ""
+            echo "### 验证统计"
+            echo '```'
+            python scripts/collect_stats.py data/last_validation.json 2>/dev/null || echo "无统计数据"
+            echo '```'
+            echo ""
+            echo "### 产物快照"
+            echo '```json'
+            cat output/meta.json 2>/dev/null || echo "{}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -n "${{ github.repository }}" ]; then
+            {
+              echo ""
+              echo "### 📡 播放器订阅地址（每日自动更新，URL 不变）"
+              echo ""
+              echo "| 用途 | 链接 |"
+              echo "|------|------|"
+              echo "| VLC / TiviMate / DIYP (m3u) | https://github.com/${{ github.repository }}/raw/main/output/live.m3u |"
+              echo "| APTV / IPTV 类 (txt) | https://github.com/${{ github.repository }}/raw/main/output/live.txt |"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi

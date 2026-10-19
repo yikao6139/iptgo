@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# 运行时产物（由程序生成，初始提交只需空目录占位）
+data/last_validation.json
+data/*.tmp
+
+# AI 助手的本地工作记忆（个人笔记，不应进仓库）
+.workbuddy/
+
+# 便携 ffmpeg（体积大，CI 上用 apt 装，不需入库）
+ffmpeg/
+bin/ffmpeg.exe
+bin/ffprobe.exe
+
+# 密钥：绝不入库
+.env
+*.token
+secrets.yml
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 注意：以下文件**必须**入库，它们是跨天累积的状态核心
+# !output/
+# !sources/
+# !data/discovered_repos.json

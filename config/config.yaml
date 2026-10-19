@@ -1,0 +1,168 @@
+# ==========================================================================
+# IPTV 自动发现引擎 —— 全局配置
+#
+# 【硬性设计约束】
+#   本文件及整个代码库中，**不得出现任何具体的 IPTV 播放地址**
+#   （禁止出现形如 http(s)://xxx/live/yyy.m3u8 的硬编码字符串）。
+#   唯一允许硬编码的是"冷启动种子"：awesome-iptv 类**元列表仓库名**，
+#   它们本身不含流地址，仅用于首次运行时给发现模块一个入口。
+#   所有具体流地址一律由 discovery 模块在运行时通过网络动态获得。
+# ==========================================================================
+
+# ---------------------------------------------------------------- 种子入口
+# 冷启动种子：只允许是「仓库坐标 owner/repo」形式，且必须是聚合/导航型仓库。
+# 引擎启动后会自动从这些仓库的 README 中递归发现新的仓库，再逐层展开。
+#
+# enabled: false 可关闭某条发现通路（本地网络受限时裁剪用，CI 保持全开）
+discovery_channels:
+  meta: true       # 元列表递归爬取
+  github: true     # GitHub REST API
+  search: true     # 搜索引擎 HTML 解析
+
+seed_repositories:
+  - fanmingming/live          # 导航型元列表
+  - iptv-org/iptv             # 元列表
+  - Guovin/iptv-api           # 聚合型 API 项目
+
+# 运行时动态扩展出的仓库会写入 data/discovered_repos.json，次日自动纳入扫描
+persist_discovered_repos: true
+max_discovered_repos: 400      # 动态仓库池上限（超出按最近活跃度淘汰）
+
+# ---------------------------------------------------------------- 发现预算
+discovery:
+  # GitHub 搜索关键词（代码级发现用）。这些是"搜索词"不是"地址"，允许硬编码。
+  search_keywords:
+    - "m3u8 iptv live"
+    - "iptv playlist m3u"
+    - "live tv m3u8 playlist"
+    - "免费 直播源 m3u8"
+    - "央视卫视 直播 m3u8"
+    - "iptv-checker playlist"
+  max_search_results_per_keyword: 40
+
+  # 搜索引擎（HTML 结果页解析，无 API Key）
+  search_engines:
+    - name: duckduckgo
+      endpoint: "https://html.duckduckgo.com/html/"
+      enabled: true
+    - name: bing
+      endpoint: "https://www.bing.com/search"
+      enabled: true
+    - name: sogou
+      endpoint: "https://www.sogou.com/web"
+      enabled: false
+
+  # 元列表递归深度：从 seed README 开始，最多再展开几层链接
+  meta_list_depth: 2
+  # 单个元列表页面最多跟随的外链数
+  max_links_per_meta_page: 60
+  # 搜索引擎每轮翻页数
+  search_pages: 2
+
+# ---------------------------------------------------------------- 采集指纹
+crawler:
+  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+  connect_timeout: 8
+  read_timeout: 15
+  max_workers: 32              # 异步并发
+  max_response_bytes: 8388608  # 8MB 截断，防止拉爆内存
+  retries: 2
+  respect_robots: true
+
+  # ---- 网络与 TLS ----
+  # 代理（可选）：走 HTTP 代理时填，如 "http://127.0.0.1:7890"
+  proxy: null
+
+  # 绕过系统代理：设为 true 时忽略 HTTP_PROXY/HTTPS_PROXY 环境变量。
+  # 本机装了 Steam++ / Watt Toolkit 等加速工具时，它会注入 http_proxy 指向
+  # 本地加速代理，该代理访问 GitHub 经常返回 502/403。绕过直连更稳。
+  # CI 环境一般设 false（那里没有这类工具）。
+  bypass_env_proxy: false
+
+  # CA 证书（可选）：本机装有 HTTPS 中间人（加速器/抓包工具/公司代理）时，
+  # 它会给 GitHub 等站点签发自签证书。Python 的 requests 默认只认 certifi
+  # 的证书库，不读操作系统证书库，于是报 CERTIFICATE_VERIFY_FAILED。
+  # 优先安装 truststore（自动使用系统证书库）：
+  #     pip install truststore
+  # 若仍不通，再用 `python diag_cert.py` 导出中间人证书填到这里。
+  ca_bundle: null
+
+  # 完全关闭证书校验（**高风险**：HTTPS 流量可被解密，仅限你完全信任的网络）
+  verify_ssl: true
+
+# ---------------------------------------------------------------- 验证门槛
+validation:
+  enabled: true
+  # 第 1 级：HTTP 可达 + 状态码
+  http_timeout: 10
+  allow_status: [200, 206, 301, 302, 307, 308]
+  # 第 2 级：HLS/DASH 清单解析（必须拿到 #EXTM3U / #EXT-X-STREAM-INF）
+  require_manifest: true
+  # 第 3 级：真实解码验证（ffprobe + ffmpeg 抽帧）。这是核心门槛
+  require_decode: true
+  ffmpeg_timeout: 18
+  probe_duration: 6            # 抽取秒数
+  min_video_kbps: 120           # 低于此码率视为无效流
+  min_resolution_width: 160
+  # 第 4 级：连续失败淘汰阈值
+  max_consecutive_failures: 3
+  # 新源试错容忍：前 N 次失败不直接淘汰（抖动保护）
+  newbie_grace_checks: 2
+  # 同一 IP 的并发验证上限，防止被目标限流
+  per_host_concurrency: 3
+
+# ---------------------------------------------------------------- 淘汰策略
+lifecycle:
+  # 超过该天数未成功验证 -> 自动淘汰出输出
+  max_idle_days: 7
+  # 淘汰后是否保留在 registry.json（保留，便于复活检测）
+  keep_tombstone: true
+  # 单次运行最多验证多少新源（控制 CI 时长）
+  max_check_per_run: 4000
+
+# ---------------------------------------------------------------- 输出
+output:
+  m3u_name: "live.m3u"
+  txt_name: "live.txt"
+  # 频道分组排序权重
+  group_priority:
+    - "央视"
+    - "卫视"
+    - "地方"
+    - "港澳"
+    - "国际"
+    - "体育"
+    - "影视"
+    - "少儿"
+    - "新闻"
+    - "其他"
+    - "演示"        # 演示模式生成的本地流（127.0.0.1），永远排在最后
+  # 排序键：score（评分）/ country / name
+  sort_by: "score"
+
+# ---------------------------------------------------------------- 发布
+# 提交回 GitHub 本仓库。播放器通过 raw 直链订阅，URL 永久不变。
+#
+# 【零 secret 配置】在 GitHub Actions 内部运行时，平台会自动注入：
+#   - GITHUB_TOKEN       内置令牌（需 workflow 声明 permissions: contents: write）
+#   - GITHUB_REPOSITORY  形如 owner/repo 的仓库坐标
+# 因此 CI 中无需配置任何 secret。本地手动运行时才需自行设置这两个变量。
+publish:
+  github_repo:
+    enabled: true
+    # 仓库坐标由环境变量提供（Actions 中自动注入），不落盘明文
+    repo_from_env: "GITHUB_REPOSITORY"
+    token_from_env: "GITHUB_TOKEN"
+    branch: "main"
+    commit_message: "chore: 自动更新直播源 ({date})"
+  # 允许通过 raw 直链暴露
+  expose_raw: true
+
+# ---------------------------------------------------------------- GitHub
+github:
+  token_from_env: "GITHUB_TOKEN"
+  api_base: "https://api.github.com"
+  # 使用 GraphQL 还是 REST：默认 REST（无需额外 scope）
+  search_endpoint: "/search/repositories"
+  # 单仓库最多抓几个文件。每个文件一次请求，太大容易超时。
+  max_files_per_repo: 8

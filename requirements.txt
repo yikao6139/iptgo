@@ -1,0 +1,8 @@
+requests>=2.31.0
+PyYAML>=6.0.1
+
+# 使用操作系统证书库（Windows/macOS）。
+# 本机装有 HTTPS 中间人（加速器/抓包工具/公司代理）时，requests 自带的
+# certifi 不认系统证书库，会报 CERTIFICATE_VERIFY_FAILED。
+# 装了它才能正常访问 GitHub 等站点。体积很小（~30KB），强烈建议安装。
+truststore; platform_system != "Linux" or python_version >= "3.10"
