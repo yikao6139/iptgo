@@ -168,3 +168,6 @@ github:
   search_endpoint: "/search/repositories"
   # 单仓库最多抓几个文件。每个文件一次请求，太大容易超时。
   max_files_per_repo: 8
+  # 并发扫描的仓库数。原实现是串行，400 个仓库要十几分钟。
+  # 调大能提速，但每个仓库会发 2 次 API 请求，太大易触发限流。8 比较稳。
+  scan_workers: 8
