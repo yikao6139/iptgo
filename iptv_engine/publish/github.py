@@ -33,6 +33,36 @@ from ..logging_utils import get_logger
 log = get_logger("publish.github")
 
 
+def _detect_branch() -> str:
+    """
+    自动探测目标分支。
+
+    优先级：
+      1. GitHub Actions 的 GITHUB_REF_NAME（最可靠，形如 "master"）
+      2. 本地 git 当前分支
+      3. 兜底 main
+
+    为什么要自动探测：仓库默认分支可能是 master / main / dev…
+    写死任何一个都会在另一种情况下 clone 到不存在的分支而失败。
+    """
+    # 1) CI 环境
+    ref = os.environ.get("GITHUB_REF_NAME", "").strip()
+    if ref:
+        return ref
+    # 2) 本地 git
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=10, shell=False,
+        )
+        name = (r.stdout or "").strip()
+        if r.returncode == 0 and name and name != "HEAD":
+            return name
+    except Exception:  # noqa: BLE001
+        pass
+    return "main"
+
+
 class GitHubPublisher:
     """把产物提交到 GitHub 仓库。"""
 
@@ -43,6 +73,11 @@ class GitHubPublisher:
             raise ValueError("GitHub 仓库格式应为 'owner/repo'")
         self.repo = repo.strip("/")
         self.token = token
+        # branch 允许为 None/空/auto —— 自动跟随运行环境（CI 里用
+        # GITHUB_REF_NAME，或退回 git 当前分支）。写死 "main" 会在
+        # 仓库默认分支是 master/main 之外的名字时导致 clone 失败。
+        if not branch or str(branch).lower() == "auto":
+            branch = _detect_branch()
         self.branch = branch
         self.commit_message = commit_message or "chore: 自动更新直播源"
         self.api_base = api_base.rstrip("/")
