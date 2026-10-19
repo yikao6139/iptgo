@@ -35,7 +35,9 @@ permissions:
 jobs:
   discover-and-validate:
     name: 发现 → 验证 → 发布
-    runs-on: ubuntu-latest
+    # 显式锁定 ubuntu-24.04：ubuntu-latest 即将迁移到 26.04，
+    # 锁定版本可避免系统升级带来的意外行为变化（如 ffmpeg 预装情况）
+    runs-on: ubuntu-24.04
     # 单次运行最长 6 小时（GitHub 上限 6h）
     timeout-minutes: 360
 
@@ -48,7 +50,7 @@ jobs:
     steps:
       # ---------------------------------------------------------- 1. 取代码
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 1
           # 保留 credentials，让后续 git push 能复用内置令牌
@@ -56,7 +58,7 @@ jobs:
 
       # ---------------------------------------------------------- 2. Python 环境
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
@@ -115,7 +117,10 @@ jobs:
             fi
           fi
           echo "运行参数:$ARGS"
-          python main.py run --log-level INFO $ARGS
+          # 注意：--log-level / --config / --registry 是**全局**参数，
+          # 必须写在子命令 run **之前**，否则 argparse 报
+          # "unrecognized arguments" 并以退出码 2 结束。
+          python main.py --log-level INFO run $ARGS
 
       # ---------------------------------------------------------- 7. 产物
       - name: Collect artifacts
@@ -137,12 +142,17 @@ jobs:
 
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: iptv-output-${{ github.run_number }}
+          # 只上传真实存在的文件；首次运行可能一个都没有，
+          # 此时用 if-no-files-found: ignore 静默跳过，避免整步失败
           path: |
-            output/
+            output/live.m3u
+            output/live.txt
+            output/meta.json
             data/last_validation.json
+          if-no-files-found: ignore
           retention-days: 15
 
       # ---------------------------------------------------------- 8. 回写状态
