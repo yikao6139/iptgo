@@ -35,6 +35,27 @@ from ..normalizer import is_private_host, normalize_url
 log = get_logger("validate.probe")
 
 
+def _brief(exc: Exception, limit: int = 120) -> str:
+    """把异常消息压成一行短文本，便于写进 reason 字段。"""
+    msg = str(exc).strip().replace("\n", " ")
+    return msg[:limit] if msg else "(无消息)"
+
+
+def _call_site(exc: Exception) -> str:
+    """取异常发生的最内层调用点，帮助判断是 requests/urllib3 还是我们的代码。"""
+    tb = exc.__traceback__
+    if tb is None:
+        return "?"
+    frames = []
+    while tb:
+        frames.append(tb)
+        tb = tb.tb_next
+    if not frames:
+        return "?"
+    f = frames[-1]
+    return f"{f.tb_frame.f_code.co_filename.split('/')[-1]}:{f.tb_lineno}"
+
+
 @dataclass
 class ProbeResult:
     """单条流的验证结果。"""
@@ -257,7 +278,13 @@ class StreamValidator:
                 )
             except Exception as exc:  # noqa: BLE001
                 res.stage = "L1"
-                res.reason = f"连接失败: {type(exc).__name__}"
+                # 只记异常类型会掩盖真因（例如 requests 内部因缺少
+                # truststore 注入而抛 AttributeError 时，只看到类名
+                # 无法定位）。这里带上异常消息和关键调用点。
+                res.reason = f"连接失败: {type(exc).__name__}: {_brief(exc)}"
+                res.notes.append(f"trace@{_call_site(exc)}")
+                log.debug("L1 请求 %s 失败: %s", url[:80], exc,
+                          exc_info=True)
                 return res, ""
 
         res.http_status = resp.status_code
