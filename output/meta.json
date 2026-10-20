@@ -1,18 +1,18 @@
 {
-  "generated_at": "2026-10-19T23:12:26",
+  "generated_at": "2026-10-20T01:55:16",
   "total_active": 0,
   "by_group": {},
   "by_quality": {},
   "avg_bitrate_kbps": 0,
   "registry_stats": {
     "active": 0,
-    "pending": 50162,
+    "pending": 56077,
     "degraded": 0,
     "retired": 0,
-    "total": 50162,
-    "validated_this_run": 4000,
+    "total": 56077,
+    "validated_this_run": 200,
     "passed_this_run": 0,
-    "discovered_this_run": 37133,
+    "discovered_this_run": 39564,
     "validation_skipped": false
   }
 }
