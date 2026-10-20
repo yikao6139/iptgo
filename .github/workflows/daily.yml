@@ -102,6 +102,13 @@ jobs:
       - name: Offline self-test
         run: python main.py selftest
 
+      # 验证器环境自检：必须在跑主流程**之前**。
+      # 验证阶段要跑几千条源、耗时一两个小时，如果环境有问题
+      # （证书/代理/依赖不兼容），到跑完才知道太浪费。
+      # 这里 5 秒内就能暴露问题并打印完整异常堆栈。
+      - name: Validator environment self-test
+        run: python tests/validate_selftest.py
+
       # ---------------------------------------------------------- 6. 主流程
       # schedule 触发时 inputs 为空，故用容错表达式：
       # 手工触发才可能带参数，定时触发一律走默认全量流程。
