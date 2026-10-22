@@ -17,7 +17,7 @@ import json
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .logging_utils import get_logger
 from .registry import STATUS_ACTIVE, RegistryEntry
@@ -126,18 +126,40 @@ def render_m3u(entries: List[RegistryEntry], out_path: Path) -> int:
     return written
 
 
-def render_txt(entries: List[RegistryEntry], out_path: Path) -> int:
-    """生成分组纯文本（DIYP 等播放器直接支持「分组,名称,地址」格式）。"""
+def render_txt(entries: List[RegistryEntry], out_path: Path,
+               group_order: Optional[List[str]] = None) -> int:
+    """
+    生成分组纯文本（DIYP TV 等国产播放器友好）。
+
+    标准 IPTV 分组文本格式（DIYP/超级直播/TVBox 通用）：
+
+        分组名,#genre#
+        频道名,地址
+        频道名,地址
+
+    即「名称,地址」两段式。早期实现写成 `分组名,频道名,地址` 三段，
+    播放器会把第一段当作频道名的一部分，导致列表里出现
+    "央视频道,CCTV-4" 这种重复且错位的名称。
+
+    分组顺序由 output.group_priority 决定（未列出的按名称排序），
+    这样中国频道可以稳定排在前面。
+    """
     groups: Dict[str, List[RegistryEntry]] = defaultdict(list)
     for e in entries:
         groups[e.group or "其他"].append(e)
 
+    # 分组排序：复用 m3u 的 _group_sort_key（支持「央视频道」「01·央视」
+    # 这类带前缀/编号的分组名匹配到「央视」），未列出的排在最后。
+    priority = group_order or DEFAULT_GROUP_ORDER
+    ordered = sorted(groups.items(),
+                     key=lambda kv: _group_sort_key(kv[0], priority))
+
     lines: List[str] = []
     written = 0
-    for gname, items in groups.items():
+    for gname, items in ordered:
         lines.append(f"{gname},#genre#")
         for e in items:
-            lines.append(f"{gname},{_display_name(e, with_tag=False)},{e.url}")
+            lines.append(f"{_display_name(e, with_tag=False)},{e.url}")
             written += 1
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -183,7 +205,8 @@ def render_all(registry, cfg: dict, out_dir: Path, extra_stats: Dict | None = No
     txt_path = out_dir / (ocfg.get("txt_name") or "live.txt")
 
     n_m3u = render_m3u(entries, m3u_path)
-    n_txt = render_txt(entries, txt_path)
+    n_txt = render_txt(entries, txt_path,
+                        group_order=ocfg.get("group_priority") or [])
     render_meta(entries, out_dir / "meta.json", cfg, extra_stats)
 
     return {"m3u": n_m3u, "txt": n_txt, "total": len(entries)}
