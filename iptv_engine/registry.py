@@ -33,7 +33,8 @@ from urllib.parse import urlsplit
 
 from .extractor import Candidate
 from .logging_utils import get_logger
-from .normalizer import dedup_key, normalize_name, normalize_url
+from .normalizer import (dedup_key, normalize_group, normalize_name,
+                           normalize_url)
 
 log = get_logger("registry")
 
@@ -306,7 +307,10 @@ class SourceRegistry:
                         key=key,
                         name=c.name,
                         name_norm=normalize_name(c.name),
-                        group=c.group or "其他",
+                        # 分组归一化：上游 m3u 对同一类频道命名各异
+                        #（「央视」「央视频道」「01·央视频道」「CCTV」），
+                        # 不归一会在播放列表里裂成多个分组，且无法按优先级排序。
+                        group=normalize_group(c.group),
                         logo=c.logo,
                         tvg_id=c.tvg_id,
                         status=STATUS_PENDING,
@@ -330,7 +334,10 @@ class SourceRegistry:
                     if entry.name_norm:
                         self._by_name.setdefault(entry.name_norm, key)
                 if c.group:
-                    entry.group = c.group
+                    # 同样归一化，否则老数据（未归一时入库的）永远是分裂的
+                    ng = normalize_group(c.group)
+                    if ng:
+                        entry.group = ng
                 if c.logo:
                     entry.logo = c.logo
                 if c.tvg_id:
