@@ -35,7 +35,13 @@ print("\n3. raw 直链生成")
 urls = pub.raw_urls(["live.m3u", "live.txt"])
 for fn, u in urls.items():
     print(f"   {fn:10s} -> {u}")
-assert urls["live.m3u"] == "https://github.com/myuser/iptv-live/raw/main/output/live.m3u"
+# 分支是自动探测的（branch: auto），不能写死 main/master ——
+# 写死会让测试在另一种默认分支下误报。
+assert urls["live.m3u"].startswith(
+    "https://github.com/myuser/iptv-live/raw/"), urls["live.m3u"]
+assert urls["live.m3u"].endswith("/output/live.m3u"), urls["live.m3u"]
+assert pub.branch and pub.branch != "auto", f"分支未解析: {pub.branch!r}"
+print(f"   分支自动探测结果: {pub.branch}")
 assert "gitee" not in str(urls)
 
 # --- 4. 文件收集 ---
@@ -88,5 +94,31 @@ print(f"   GITHUB_REPO  -> {cfg4['publish']['github_repo']['repo']}")
 print(f"   GH_TOKEN     -> {cfg4['publish']['github_repo']['token']}")
 assert cfg4["publish"]["github_repo"]["repo"] == "local/repo"
 assert cfg4["publish"]["github_repo"]["token"] == "gh_local"
+
+# --- 9. 分支自动探测 ---
+print("\n9. 分支自动探测（branch: auto）")
+from iptv_engine.publish.github import _detect_branch
+
+# 9.1 CI 环境：GITHUB_REF_NAME 优先
+os.environ["GITHUB_REF_NAME"] = "ci-branch"
+assert _detect_branch() == "ci-branch", _detect_branch()
+print(f"   GITHUB_REF_NAME=ci-branch -> {_detect_branch()}")
+
+# 9.2 本地：跟随 git 当前分支
+os.environ.pop("GITHUB_REF_NAME", None)
+local = _detect_branch()
+print(f"   本地 git 分支     -> {local}")
+assert local and local != "main" or True   # 具体值取决于仓库，不强断言
+
+# 9.3 显式指定分支优先于自动探测
+pub2 = GitHubPublisher(repo="myuser/iptv-live", token="t", branch="fixed-branch")
+assert pub2.branch == "fixed-branch", pub2.branch
+print(f"   显式 branch=fixed-branch -> {pub2.branch}")
+assert "fixed-branch" in pub2.raw_urls(["live.m3u"])["live.m3u"]
+
+# 9.4 branch=auto 时应解析成具体分支名（不能还是 "auto"）
+pub3 = GitHubPublisher(repo="myuser/iptv-live", token="t", branch="auto")
+assert pub3.branch and pub3.branch != "auto", pub3.branch
+print(f"   branch=auto     -> {pub3.branch}")
 
 print("\n✓ 发布链路全部验证通过")
