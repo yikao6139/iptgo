@@ -35,11 +35,23 @@ class ValidationBatchRunner:
         self._local = threading.local()
 
     def _validator(self, session_factory: SessionFactory) -> StreamValidator:
+        """取当前线程的验证器（每线程独立，持有各自的每主机信号量表）。"""
         v = getattr(self._local, "validator", None)
         if v is None:
             v = StreamValidator(self.cfg, session_factory)
             self._local.validator = v
         return v
+
+    def _validate_one(self, candidate):
+        """
+        在**工作线程内**创建验证器并验证单条候选。
+
+        早期实现在主线程调用 self._validator(...) 再把 bound method
+        提交给线程池 —— 那会导致所有工作线程共用主线程创建的那一个验证器，
+        违背「每线程一个实例」的设计（信号量表与 Session 都不再隔离）。
+        正确做法是把「创建 + 验证」整个过程放进工作线程。
+        """
+        return self._validator(self._make_sf()).validate(candidate)
 
     def _flush(self) -> None:
         with self.lock:
@@ -79,7 +91,7 @@ class ValidationBatchRunner:
             batch = todo[batch_start : batch_start + batch_size]
             with ThreadPoolExecutor(max_workers=pool_size, thread_name_prefix="val") as ex:
                 fut2cand = {
-                    ex.submit(self._validator(self.cfg and self._make_sf()).validate, c): c
+                    ex.submit(self._validate_one, c): c
                     for c in batch
                 }
                 for fut in as_completed(fut2cand):
@@ -124,8 +136,13 @@ class ValidationBatchRunner:
         """每个工作线程用独立 SessionFactory，避免限流器争用与 Session 线程安全问题。"""
         sf = getattr(self._local, "sf", None)
         if sf is None:
-            self._local.sf = build_session_factory(self.cfg, pool_size=4,
-                                                    retries=1, qps=30.0)
+            sf = build_session_factory(self.cfg, pool_size=4,
+                                      retries=1, qps=30.0)
+            # 必须赋回 self._local —— 下一行要返回它。
+            # （早期版本写的是 self._local.sf = ... 然后 return sf，
+            #  返回的仍是旧局部变量 None，导致验证器拿到 None，
+            #  报 "'NoneType' object has no attribute 'limiter'"）
+            self._local.sf = sf
         return sf
 
     @staticmethod
