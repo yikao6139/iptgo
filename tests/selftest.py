@@ -441,6 +441,85 @@ def test_validator_l0() -> None:
     check("空地址卡在 L0", res3.stage == "L0", f"stage={res3.stage}")
 
 
+def test_batch_runner_sf() -> None:
+    """
+    验证器拿到的 SessionFactory 不能是 None。
+
+    历史 bug：_make_sf() 写成
+        sf = getattr(self._local, "sf", None)
+        if sf is None:
+            self._local.sf = build_session_factory(...)   # 存进 local
+        return sf                                        # 返回的仍是 None！
+    结果所有候选都在 L1 报
+        "'NoneType' object has no attribute 'limiter'"
+    通过率恒为 0%，且白跑一两个小时。
+
+    另外还校验「每线程一个验证器」：早期在主线程创建验证器再提交给线程池，
+    会让所有工作线程共用一个实例（信号量表不再隔离）。
+    """
+    print("\n[12] 批量验证器的 SessionFactory 传递")
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from iptv_engine.validate.batch_runner import ValidationBatchRunner
+
+    cfg = load_config()
+    tmp = Path(tempfile.mkdtemp(prefix="selftest_br_"))
+    runner = ValidationBatchRunner(cfg, None, tmp / "r.json")
+
+    sf = runner._make_sf()
+    check("_make_sf 返回 SessionFactory", sf is not None, f"sf={sf!r}")
+    check("SessionFactory 带 limiter", hasattr(sf, "limiter") and sf.limiter is not None)
+    check("SessionFactory 带 get 方法", callable(getattr(sf, "get", None)))
+
+    v = runner._validator(sf)
+    check("验证器拿到非 None 的 sf", v.sf is not None, f"v.sf={v.sf!r}")
+    check("验证器的 sf 有 limiter",
+          getattr(v.sf, "limiter", None) is not None,
+          "会出现 'NoneType' object has no attribute 'limiter'")
+
+    # 每线程一个验证器
+    ids = {}
+    barrier = threading.Barrier(4)
+
+    def probe(i: int) -> int:
+        val = runner._validator(runner._make_sf())
+        barrier.wait()          # 确保 4 个线程同时进入
+        ids[i] = id(val)
+        return i
+
+    try:
+        with ThreadPoolExecutor(4) as ex:
+            list(ex.map(probe, range(4)))
+    except Exception as exc:  # noqa: BLE001
+        check("并发创建验证器", False, str(exc))
+        return
+    vals = list(ids.values())
+    check("每个工作线程有独立验证器", len(set(vals)) == 4,
+          f"实例数={len(set(vals))}（应等于线程数 4）")
+
+    # 端到端：不能出现 AttributeError / NoneType
+    # 注意 run() 只返回**通过**的结果，失败的在 runner.results 里
+    try:
+        runner.run(
+            [Candidate(url="https://example.com/x.m3u", name="probe")],
+            batch_size=1)
+        all_res = runner.results
+        check("端到端验证产出结果", len(all_res) >= 1, f"{len(all_res)} 条")
+        bad = [r for r in all_res
+               if "AttributeError" in r.get("reason", "")
+               or "NoneType" in r.get("reason", "")]
+        check("端到端验证无 AttributeError/NoneType", not bad,
+              bad[0].get("reason") if bad else "")
+        # 失败的也要有可读的 reason，便于统计脚本归类
+        empty = [r for r in all_res
+                 if not r.get("ok") and not r.get("reason")]
+        check("失败项都有 reason", not empty,
+              f"{len(empty)} 条 reason 为空")
+    except Exception as exc:  # noqa: BLE001
+        check("端到端验证不抛异常", False, f"{type(exc).__name__}: {exc}")
+
+
 # ---------------------------------------------------------------- main
 def run_selftest() -> bool:
     print("\n" + "=" * 72)
@@ -458,6 +537,7 @@ def run_selftest() -> bool:
     test_render()
     test_ssrf()
     test_validator_l0()
+    test_batch_runner_sf()
 
     total = len(_results)
     failed = [r for r in _results if not r[1]]
