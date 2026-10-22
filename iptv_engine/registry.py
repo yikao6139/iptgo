@@ -29,6 +29,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 from .extractor import Candidate
 from .logging_utils import get_logger
@@ -161,6 +162,49 @@ def _days_since(ts: str) -> float:
         return (time.time() - t) / 86400.0
     except ValueError:
         return 1e9
+
+
+def _host_of(url: str) -> str:
+    """
+    取 URL 的 host。
+
+    注意：这里**不要**用 try/except 把一切异常都吞掉返回空串 ——
+    那样一旦漏了导入（如 NameError）或写错参数，会静默返回空串，
+    让域名均衡悄悄失效，表现为"配了却没效果"，极难排查。
+    这里只对真正的 URL 解析失败兜底。
+    """
+    if not url:
+        return ""
+    try:
+        return (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        # ValueError: 畸形 URL（如端口非法），是数据问题不是代码问题
+        return ""
+
+
+def _rebalance_by_host(queue: List[Candidate], cap: int) -> List[Candidate]:
+    """
+    域名均衡：每个域名最多保留 cap 条，超出部分按原顺序顺延到队尾。
+
+    保持原有优先级顺序不变（新源仍在降级源之前），只是把
+    同一域名的超额部分挪到后面，让前面的位置让给别的域名。
+
+    为什么需要：抽取阶段常从同一个 m3u 文件里抽出一批同域名的条目
+    （实测 100 条验证配额里 98 条来自同一个域名且全部不可达），
+    结果"看起来挖了很多源"，实际只覆盖了一个站点。
+    """
+    kept: List[Candidate] = []
+    overflow: List[Candidate] = []
+    seen: Dict[str, int] = {}
+    for c in queue:
+        h = _host_of(c.url) or "(unknown)"
+        n = seen.get(h, 0)
+        if n < cap:
+            seen[h] = n + 1
+            kept.append(c)
+        else:
+            overflow.append(c)
+    return kept + overflow
 
 
 class SourceRegistry:
@@ -497,6 +541,17 @@ class SourceRegistry:
             queue += [to_cand(e) for e in fresh]
             queue += [to_cand(e) for e in degraded]
             queue += [to_cand(e) for e in routine]
+
+            # ---- 域名均衡（domain diversity）----
+            # 为什么需要：抽取阶段常从同一个 m3u 文件里抽出一批同域名的条目。
+            # 若不限制，这些条目在注册表里连续排布，会把本轮验证配额全占掉
+            # （实测 100 条里 98 条来自同一个域名 pi.0472.org，且全部不可达）。
+            # 结果是"看起来挖了很多源"，实际只覆盖了一个站点。
+            # 这里给每个域名设上限，超出部分顺延到后续轮次。
+            cap = int(vcfg.get("max_candidates_per_host", 3) or 0)
+            if cap > 0:
+                queue = _rebalance_by_host(queue, cap)
+
             return queue[:limit]
 
     # ------------------------------------------------------------ 清理
