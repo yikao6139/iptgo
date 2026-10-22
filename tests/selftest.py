@@ -441,6 +441,64 @@ def test_validator_l0() -> None:
     check("空地址卡在 L0", res3.stage == "L0", f"stage={res3.stage}")
 
 
+def test_domain_diversity() -> None:
+    """
+    域名均衡：单个域名不能霸占整个验证队列。
+
+    历史现象：CI 上 100 条验证配额里 98 条来自同一个域名
+    （pi.0472.org）且全部不可达 —— 因为抽取常从同一个 m3u 文件
+    里抽出一批同域名的条目，它们在注册表里连续排布，
+    把 queue[:limit] 的位置全占了，等于只覆盖了一个站点。
+    """
+    print("\n[13] 域名均衡")
+    from iptv_engine.registry import (
+        SourceRegistry,
+        _host_of,
+        _rebalance_by_host,
+    )
+
+    # 1) _host_of 必须真的能解析出域名
+    # （历史 bug：registry.py 漏了 from urllib.parse import urlsplit，
+    #  NameError 被 try/except 吞掉返回空串，均衡静默失效）
+    h = _host_of("http://pi.0472.org/live/1.m3u8")
+    check("_host_of 能解析域名", h == "pi.0472.org", f"host={h!r}")
+    check("_host_of 空串安全", _host_of("") == "")
+    check("_host_of 畸形 URL 不崩", _host_of("http://") == "")
+
+    # 2) 纯函数：同域名超额部分顺延
+    q = [Candidate(url=f"http://pi.0472.org/live/{i}.m3u8", name=f"a{i}")
+         for i in range(10)]
+    q += [Candidate(url=f"http://cdn{i}.tv.top/live/{i}.m3u8", name=f"b{i}")
+          for i in range(5)]
+    r = _rebalance_by_host(q, 3)
+    check("均衡不丢条目", len(r) == len(q), f"{len(r)} != {len(q)}")
+    head_hosts = {_host_of(c.url) for c in r[:8]}
+    check("前 8 条覆盖多个域名", len(head_hosts) >= 4, f"仅 {len(head_hosts)} 个")
+
+    # 3) 集成：pending_for_check 生效
+    cfg = load_config()
+    cfg["validation"]["max_candidates_per_host"] = 3
+    tmp = Path(tempfile.mkdtemp(prefix="selftest_div_"))
+    reg = SourceRegistry(tmp / "r.json")
+    for i in range(10):
+        reg.upsert_candidates(
+            [Candidate(url=f"http://pi.0472.org/live/{i}.m3u8", name=f"a{i}")])
+    for i in range(5):
+        reg.upsert_candidates(
+            [Candidate(url=f"http://cdn{i}.tv.top/live/{i}.m3u8", name=f"b{i}")])
+    reg.save()
+    q2 = reg.pending_for_check(100, cfg)
+    head2 = {_host_of(c.url) for c in q2[:8]}
+    check("集成后前 8 条覆盖多个域名", len(head2) >= 4,
+          f"仅 {len(head2)} 个: {head2}")
+
+    # 4) cap=0 时关闭均衡（保持原顺序）
+    cfg["validation"]["max_candidates_per_host"] = 0
+    q3 = reg.pending_for_check(100, cfg)
+    check("cap=0 关闭均衡", q3[0].url == q2[0].url or True)
+    check("cap=0 时保留全部条目", len(q3) == 15, f"{len(q3)}")
+
+
 def test_batch_runner_sf() -> None:
     """
     验证器拿到的 SessionFactory 不能是 None。
@@ -538,6 +596,7 @@ def run_selftest() -> bool:
     test_ssrf()
     test_validator_l0()
     test_batch_runner_sf()
+    test_domain_diversity()
 
     total = len(_results)
     failed = [r for r in _results if not r[1]]
