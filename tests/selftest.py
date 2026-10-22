@@ -499,6 +499,75 @@ def test_domain_diversity() -> None:
     check("cap=0 时保留全部条目", len(q3) == 15, f"{len(q3)}")
 
 
+def test_group_and_txt_format() -> None:
+    """
+    分组归一化 + txt 输出格式。
+
+    两个历史问题：
+    1. txt 写成「分组名,频道名,地址」三段式，播放器把第一段当频道名
+       的一部分，出现 "央视频道,CCTV-4" 这种重复错位的名称。
+       标准 IPTV 格式是「频道名,地址」两段，分组只在 #genre# 行声明。
+    2. 上游分组命名各异（央视/央视频道/01·央视频道/CCTV 其实是同一类），
+       不归一会裂成多个分组，也无法按优先级排序。
+    """
+    print("\n[14] 分组归一化与 txt 格式")
+    from iptv_engine.normalizer import normalize_group
+    from iptv_engine.registry import SourceRegistry, STATUS_ACTIVE
+    from iptv_engine.renderer import render_txt
+
+    # 1) 归一化
+    cases = {
+        "央视": "央视", "央视频道": "央视", "01·央视频道": "央视",
+        "CCTV": "央视", "cctv": "央视", "央视台": "央视",
+        "卫视台": "卫视", "省级卫视": "卫视",
+        "香港": "港澳台", "台湾": "港澳台", "澳门": "港澳台",
+        "": "其他",
+    }
+    for raw, want in cases.items():
+        got = normalize_group(raw)
+        check(f"归一化 {raw!r} -> {want!r}", got == want, f"得到 {got!r}")
+    # 未命中的保持原样，不强行归并
+    check("未知分组保持原样", normalize_group("BBC") == "BBC")
+
+    # 2) txt 格式：必须是「名称,地址」两段
+    tmp = Path(tempfile.mkdtemp(prefix="selftest_txt_"))
+    reg = SourceRegistry(tmp / "r.json")
+    rows = [
+        ("CCTV-4", "央视频道", "http://h/live/cctv4.m3u8"),
+        ("凤凰卫视", "香港", "http://h/live/fh.m3u8"),
+        ("BBC One", "BBC", "http://h/live/bbc.m3u8"),
+    ]
+    for name, group, url in rows:
+        reg.upsert_candidates([Candidate(url=url, name=name, group=group)])
+    reg.save()
+    for e in reg.all_entries():
+        e.status = STATUS_ACTIVE
+    p = tmp / "live.txt"
+    render_txt(reg.all_entries(), p,
+               group_order=["央视", "卫视", "港澳台", "国际", "其他"])
+    lines = [l for l in p.read_text(encoding="utf-8").splitlines() if l]
+
+    # 每个非 #genre# 行必须只有一段逗号分隔（名称可能含逗号，按 URL 定位）
+    for line in lines:
+        if "#genre#" in line:
+            continue
+        check(f"行格式为「名称,地址」: {line[:40]}",
+              line.rstrip(",").count(",") <= 1 and "http" in line,
+              f"逗号数={line.count(',')}")
+    # 不能出现「分组名,频道名,地址」
+    check("无三段式残留", "央视频道,CCTV-4" not in p.read_text(encoding="utf-8"))
+    # 分组已归一：应只有 3 个 #genre# 行，且无「香港」分组
+    genre = [l for l in lines if "#genre#" in l]
+    check("分组已归一（3 个）", len(genre) == 3, f"{len(genre)} 个: {genre}")
+    check("「香港」已并入港澳台", "香港,#genre#" not in lines)
+
+    # 3) 排序：中国频道在国际频道之前
+    idx_cn = next(i for i, l in enumerate(lines) if "港澳台,#genre#" in l)
+    idx_intl = next(i for i, l in enumerate(lines) if "BBC,#genre#" in l)
+    check("中国频道排在 international 之前", idx_cn < idx_intl,
+          f"港澳台@{idx_cn} BBC@{idx_intl}")
+
+
 def test_batch_runner_sf() -> None:
     """
     验证器拿到的 SessionFactory 不能是 None。
@@ -597,6 +666,7 @@ def run_selftest() -> bool:
     test_validator_l0()
     test_batch_runner_sf()
     test_domain_diversity()
+    test_group_and_txt_format()
 
     total = len(_results)
     failed = [r for r in _results if not r[1]]
