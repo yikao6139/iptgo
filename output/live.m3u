@@ -1,1 +1,4 @@
 #EXTM3U
+#EXTINF:-1 tvg-id="d6ebed655b2e" tvg-name="iptv" group-title="其他",iptv
+#EXTVLCOPT:http-referrer=https://github.com/iptv-org/iptv
+https://iptv-org.github.io/iptv/index.m3u

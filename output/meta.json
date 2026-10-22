@@ -1,18 +1,22 @@
 {
-  "generated_at": "2026-10-21T22:10:37",
-  "total_active": 0,
-  "by_group": {},
-  "by_quality": {},
+  "generated_at": "2026-10-22T02:26:28",
+  "total_active": 1,
+  "by_group": {
+    "其他": 1
+  },
+  "by_quality": {
+    "SD/未知": 1
+  },
   "avg_bitrate_kbps": 0,
   "registry_stats": {
-    "active": 0,
-    "pending": 64522,
+    "active": 1,
+    "pending": 66860,
     "degraded": 0,
     "retired": 0,
-    "total": 64522,
-    "validated_this_run": 4000,
-    "passed_this_run": 0,
-    "discovered_this_run": 41444,
+    "total": 66861,
+    "validated_this_run": 100,
+    "passed_this_run": 1,
+    "discovered_this_run": 39069,
     "validation_skipped": false
   }
 }
